@@ -1,0 +1,22 @@
+# Installed normally: none of these depend on torch.
+#   python3 -m pip install --no-cache-dir -r requirements.txt
+# Then requirements-nodeps.txt is installed with --no-deps. Never `pip install transformers`
+# with dependencies: pip may replace the base image's ROCm torch with a CUDA wheel.
+#
+# These are the non-torch dependencies of transformers 5.22.1 and accelerate 1.15.0
+# (checked on PyPI 2026-11-01). Packages the base image may already ship use >= so
+# pip leaves them alone; packages we add are pinned.
+huggingface-hub==2.4.0
+tokenizers==0.23.3
+safetensors==0.8.0
+regex>=2025.10.22
+typer
+psutil
+pyyaml>=5.1
+packaging>=20.0
+numpy>=1.17
+tqdm>=4.60
+filelock
+requests
+# apply_chat_template needs jinja2; the base normally has it as a torch dependency.
+jinja2>=3.1.0

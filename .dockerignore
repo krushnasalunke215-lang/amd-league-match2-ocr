@@ -1,0 +1,8 @@
+# Build context is the repo root. Send only what the Dockerfiles COPY.
+**
+!common
+!common/**
+!match2-ocr/app
+!match2-ocr/app/**
+!match2-ocr/Dockerfile
+**/__pycache__

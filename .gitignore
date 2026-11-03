@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+
+# Secrets and the Docker Hub image reference (never commit either)
+.env
+.env.*
+.image-ref
+
+# Logs, weights, local agent notes
+*.log
+models/
+.agents/
+
+# Eval data is regenerated from the brief PDF; outputs are run artefacts
+match2-ocr/eval/samples/
+match2-ocr/eval/samples_allformats/
+match2-ocr/eval/degraded/
+match2-ocr/eval/synthetic/
+match2-ocr/eval/outputs/
+**/eval/outputs/

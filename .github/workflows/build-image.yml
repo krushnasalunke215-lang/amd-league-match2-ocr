@@ -1,0 +1,116 @@
+# Build, check and optionally push a Match image on a GitHub-hosted runner (no AMD VM needed).
+#
+# Manual only (Actions tab > build-image > Run workflow), so it never runs on pushes or pull requests.
+# The runner has no GPU: the contract check uses the fake OCR backend. The real model, VRAM and
+# timing are checked in the AMD notebook (run_local.py) and on the GPU VM (selfcheck_mc2.py).
+# Repository secrets, read only by the push step: DOCKERHUB_USER, DOCKERHUB_TOKEN, DOCKERHUB_REPO.
+# The image reference is never printed; in the log it shows as ***.
+name: build-image
+
+on:
+  workflow_dispatch:
+    inputs:
+      match_dir:
+        description: Match folder with the Dockerfile (the build context is the repo root)
+        type: string
+        default: match2-ocr
+      model_id:
+        description: Hugging Face model baked into /models
+        type: string
+        default: Qwen/Qwen2.5-VL-7B-Instruct
+      tag:
+        description: Image tag
+        type: string
+        default: v1
+      push:
+        description: Push to Docker Hub after all checks pass
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-image
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    # Pinned: ubuntu-24.04 has Docker 28 with the classic image store. ubuntu-latest is moving
+    # to 26.04 (Docker 29, containerd store; tools/ci_disk.sh turns that off either way).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      MATCH_DIR: ${{ inputs.match_dir }}
+      MODEL_ID: ${{ inputs.model_id }}
+      TAG: ${{ inputs.tag }}
+      LOCAL_IMAGE: ${{ inputs.match_dir }}-local:${{ inputs.tag }}
+      MIN_FREE_GIB: "55"
+      BUILDKIT_PROGRESS: plain
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the inputs
+        run: |
+          [[ "$MATCH_DIR" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ && -f "$MATCH_DIR/Dockerfile" ]] \
+            || { echo "::error::match_dir must be a top-level folder with a Dockerfile, e.g. match2-ocr"; exit 1; }
+          [[ "$MATCH_DIR" == match2-ocr ]] \
+            || { echo "::error::only match2-ocr has a contract check here (tools/selfcheck_mc2.py); add one for $MATCH_DIR first"; exit 1; }
+          [[ "$MODEL_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
+            || { echo "::error::model_id must look like org/name"; exit 1; }
+          [[ "$TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] \
+            || { echo "::error::tag must be a valid Docker tag, e.g. v1"; exit 1; }
+
+      - name: Free disk space, move Docker storage to the biggest disk
+        run: bash tools/ci_disk.sh "$MIN_FREE_GIB"
+
+      # BuildKit does not list the FROM image in `docker images`; pulling it first lets
+      # build_push.sh compare the base layers instead of skipping that check.
+      - name: Pull the base image
+        run: |
+          base="$(awk 'toupper($1) == "FROM" { b = $2 } END { print b }' "$MATCH_DIR/Dockerfile")"
+          echo "base: $base"
+          docker pull "$base"
+
+      - name: Build and check (tools/build_push.sh, no push)
+        run: bash tools/build_push.sh "$MATCH_DIR" "$MODEL_ID" --tag "$TAG"
+
+      - name: Make synthetic PNG, JPEG and TIFF images (inside the image, no network)
+        run: |
+          mkdir -p "$RUNNER_TEMP/synthetic"
+          docker run --rm --network none --user "$(id -u):$(id -g)" \
+            -v "$PWD/match2-ocr/eval/make_synthetic.py:/work/make_synthetic.py:ro" \
+            -v "$RUNNER_TEMP/synthetic:/out" \
+            --entrypoint python3 "$LOCAL_IMAGE" /work/make_synthetic.py --out /out
+          ls -l "$RUNNER_TEMP/synthetic"
+
+      - name: Contract check with the fake backend (selfcheck_mc2.py --fake-backend)
+        run: python3 tools/selfcheck_mc2.py "$LOCAL_IMAGE" "$RUNNER_TEMP/synthetic" --fake-backend
+
+      - name: Image size
+        run: |
+          bytes="$(docker image inspect --format '{{.Size}}' "$LOCAL_IMAGE")"
+          size="$(awk -v b="$bytes" 'BEGIN { printf "%.2f GiB", b / 2^30 }')"
+          echo "$LOCAL_IMAGE uncompressed: $size (limit 60 GiB)"
+          echo "- \`$LOCAL_IMAGE\` ($MODEL_ID): $size uncompressed, build and contract checks passed" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Push to Docker Hub, check it pulls without credentials
+        if: ${{ inputs.push }}
+        env:
+          DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USER }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOCKERHUB_REPO: ${{ secrets.DOCKERHUB_REPO }}
+        run: bash tools/ci_push.sh "$LOCAL_IMAGE" "$TAG"
+
+      - name: Disk after
+        if: ${{ always() }}
+        run: |
+          df -h
+          docker system df || true
